@@ -82,7 +82,8 @@ def do_train(cfg,
             scaler.step(optimizer)
             scaler.update()
 
-            if 'center' in cfg.MODEL.METRIC_LOSS_TYPE:
+            # 核心修正：判断质心损失是否开启并执行优化
+            if cfg.MODEL.IF_WITH_CENTER == 'yes' or 'center' in cfg.MODEL.METRIC_LOSS_TYPE:
                 for param in center_criterion.parameters():
                     param.grad.data *= (1. / cfg.SOLVER.CENTER_LOSS_WEIGHT)
                 scaler.step(optimizer_center)
@@ -118,7 +119,7 @@ def do_train(cfg,
             else:
                 torch.save(model.state_dict(), save_path)
 
-        # --- 核心修正：验证环节必须调用 do_inference 以激活 Cheb-GR ---
+        # --- 验证环节：调用 do_inference 以激活 Cheb-GR ---
         if epoch % eval_period == 0:
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
@@ -174,7 +175,7 @@ def do_inference(cfg,
         distmat = distmat.cpu().numpy()
 
         if cfg.TEST.RE_RANKING_TYPE == 'cheb_gr':
-            # Cheb-GR: 线性复杂度重排序，完美契合 30ms 红线
+            # Cheb-GR: 线性复杂度重排序
             logger.info("Applying Cheb-GR re-ranking...")
             distmat = cheb_gr_reranking(distmat, kappa=cfg.TEST.KAPPA)
         else:
