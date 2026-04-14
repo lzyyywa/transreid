@@ -30,16 +30,12 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
         Key: for each query identity, its gallery images from the same camera view are discarded.
         """
     num_q, num_g = distmat.shape
-    # distmat g
-    #    q    1 3 2 4
-    #         4 1 2 3
     if num_g < max_rank:
         max_rank = num_g
         print("Note: number of gallery samples is quite small, got {}".format(num_g))
     indices = np.argsort(distmat, axis=1)
-    #  0 2 1 3
-    #  1 2 3 0
     matches = (g_pids[indices] == q_pids[:, np.newaxis]).astype(np.int32)
+
     # compute cmc curve for each query
     all_cmc = []
     all_AP = []
@@ -50,12 +46,12 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
         q_camid = q_camids[q_idx]
 
         # remove gallery samples that have the same pid and camid with query
-        order = indices[q_idx]  # select one row
-        keep = np.ones(len(order), dtype=bool)
+        order = indices[q_idx]
+        remove = (g_pids[order] == q_pid) & (g_camids[order] == q_camid)
+        keep = np.invert(remove)
 
         # compute cmc curve
-        # binary vector, positions with value 1 are correct matches
-        orig_cmc = matches[q_idx][keep]
+        orig_cmc = matches[q_idx][keep] # binary vector, positions with value 1 are correct matches
         if not np.any(orig_cmc):
             # this condition is true when query identity does not appear in gallery
             continue
@@ -67,10 +63,8 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
         num_valid_q += 1.
 
         # compute average precision
-        # reference: https://en.wikipedia.org/wiki/Evaluation_measures_(information_retrieval)#Average_precision
         num_rel = orig_cmc.sum()
         tmp_cmc = orig_cmc.cumsum()
-        #tmp_cmc = [x / (i + 1.) for i, x in enumerate(tmp_cmc)]
         y = np.arange(1, tmp_cmc.shape[0] + 1) * 1.0
         tmp_cmc = tmp_cmc / y
         tmp_cmc = np.asarray(tmp_cmc) * orig_cmc
@@ -83,16 +77,17 @@ def eval_func(distmat, q_pids, g_pids, q_camids, g_camids, max_rank=50):
     all_cmc = all_cmc.sum(0) / num_valid_q
     mAP = np.mean(all_AP)
 
-    return all_cmc, mAP
+    return all_cmc, mAP, all_AP
 
 
 class R1_mAP_eval():
-    def __init__(self, num_query, max_rank=50, feat_norm=True, reranking=False):
+    def __init__(self, num_query, max_rank=50, feat_norm='yes', reranking=False):
         super(R1_mAP_eval, self).__init__()
         self.num_query = num_query
         self.max_rank = max_rank
         self.feat_norm = feat_norm
         self.reranking = reranking
+        self.reset()
 
     def reset(self):
         self.feats = []
@@ -105,31 +100,35 @@ class R1_mAP_eval():
         self.pids.extend(np.asarray(pid))
         self.camids.extend(np.asarray(camid))
 
-    def compute(self):  # called after each epoch
-        feats = torch.cat(self.feats, dim=0)
-        if self.feat_norm:
-            print("The test feature is normalized")
-            feats = torch.nn.functional.normalize(feats, dim=1, p=2)  # along channel
-        # query
-        qf = feats[:self.num_query]
+    def compute(self, distmat=None):  # 核心修复点：增加 distmat 参数接收
+        features = torch.cat(self.feats, dim=0)
+        # 分离 query 
+        qf = features[:self.num_query]
         q_pids = np.asarray(self.pids[:self.num_query])
         q_camids = np.asarray(self.camids[:self.num_query])
-        # gallery
-        gf = feats[self.num_query:]
+        # 分离 gallery
+        gf = features[self.num_query:]
         g_pids = np.asarray(self.pids[self.num_query:])
-
         g_camids = np.asarray(self.camids[self.num_query:])
-        if self.reranking:
-            print('=> Enter reranking')
-            # distmat = re_ranking(qf, gf, k1=20, k2=6, lambda_value=0.3)
-            distmat = re_ranking(qf, gf, k1=50, k2=15, lambda_value=0.3)
 
-        else:
-            print('=> Computing DistMat with euclidean_distance')
-            distmat = euclidean_distance(qf, gf)
-        cmc, mAP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids)
+        # 增加逻辑判断：如果外部没有传入重排序矩阵，才自己计算距离
+        if distmat is None:
+            if self.feat_norm == 'yes':
+                print("The test feature is normalized")
+                qf = torch.nn.functional.normalize(qf, dim=1, p=2)
+                gf = torch.nn.functional.normalize(gf, dim=1, p=2)
+            
+            if self.reranking:
+                print('=> Enter reranking')
+                distmat = re_ranking(qf, gf, k1=50, k2=15, lambda_value=0.3)
+            else:
+                print('=> Computing DistMat with euclidean_distance')
+                m, n = qf.shape[0], gf.shape[0]
+                distmat = torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
+                          torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
+                distmat.addmm_(1, -2, qf, gf.t())
+                distmat = distmat.cpu().numpy()
+            
+        cmc, mAP, all_AP = eval_func(distmat, q_pids, g_pids, q_camids, g_camids)
 
         return cmc, mAP, distmat, self.pids, self.camids, qf, gf
-
-
-
