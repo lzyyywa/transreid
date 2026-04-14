@@ -1,12 +1,14 @@
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: ''  # 预训练权重路径
+  # 预训练权重的绝对路径
+  PRETRAIN_PATH: '/root/TransReID-master/weights/jx_vit_base_p16_224-80ecf9dd.pth'
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
-  IF_WITH_CENTER: 'no'
+  # 核心修改：开启质心损失（配合已修复的 make_loss.py）
+  IF_WITH_CENTER: 'yes'
   NAME: 'transformer'
   NO_MARGIN: True
-  DEVICE_ID: ('5')
+  DEVICE_ID: ('0')
   TRANSFORMER_TYPE: 'vit_base_patch16_224_TransReID'
   STRIDE_SIZE: [12, 12]
   SIE_CAMERA: True
@@ -17,15 +19,19 @@ MODEL:
 INPUT:
   SIZE_TRAIN: [256, 128]
   SIZE_TEST: [256, 128]
-  PROB: 0.5 # random horizontal flip
-  RE_PROB: 0.5 # random erasing
+  PROB: 0.5 # 随机水平翻转
+  RE_PROB: 0.5 # 随机擦除
   PADDING: 10
   PIXEL_MEAN: [0.5, 0.5, 0.5]
   PIXEL_STD: [0.5, 0.5, 0.5]
+  # 阶段 1：物理运动模糊概率。建议从 0.5 降至 0.25，缓解初期训练压力
+  MOTION_BLUR_PROB: 0.25
 
 DATASETS:
   NAMES: ('ballshow')
-  ROOT_DIR: ('./data/BallShow')
+  ROOT_DIR: '/root/TransReID-master/data/'
+  # 阶段 2：开启批次内行人遮挡增强
+  BIPO: True
 
 DATALOADER:
   SAMPLER: 'softmax_triplet'
@@ -41,19 +47,23 @@ SOLVER:
   LARGE_FC_LR: False
   CHECKPOINT_PERIOD: 120
   LOG_PERIOD: 50
-  EVAL_PERIOD: 120
-  WEIGHT_DECAY:  1e-4
+  EVAL_PERIOD: 20 # 建议调低验证频率（如每20轮），以便及时观察 Cheb-GR 带来的增益
+  WEIGHT_DECAY: 1e-4
   WEIGHT_DECAY_BIAS: 1e-4
   BIAS_LR_FACTOR: 2
+  # 阶段 3：质心损失平衡权重
+  CENTER_LOSS_WEIGHT: 0.0005
 
 TEST:
   EVAL: True
   IMS_PER_BATCH: 256
-  RE_RANKING: False
-  WEIGHT: ''
+  # 阶段 4：配置超低延迟重排序
+  RE_RANKING: False # 禁用旧版 k-reciprocal
+  RE_RANKING_TYPE: 'cheb_gr' # 开启 Cheb-GR
+  KAPPA: 2.0 # 切比雪夫过滤强度
+  WEIGHT: '/root/TransReID-master/logs/BallShow_vit_transreid_stride/transformer_120.pth'
   NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
+# 训练日志和模型参数保存的路径
 OUTPUT_DIR: 'logs/BallShow_vit_transreid_stride'
-
-
