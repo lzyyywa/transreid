@@ -69,7 +69,16 @@ if __name__ == '__main__':
 
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
 
-    optimizer, optimizer_center = make_optimizer(cfg, model, center_criterion)
+    # 1. 首先通过 make_optimizer 初始化主模型的优化器
+    # 注意：我们这里接收返回的第二个值（_），随后根据修复逻辑重新手动定义 optimizer_center
+    optimizer, _ = make_optimizer(cfg, model, center_criterion)
+
+    # 2. 核心修复逻辑：根据 IF_WITH_CENTER 标志位精准接管质心优化器
+    if cfg.MODEL.IF_WITH_CENTER == 'yes' or 'center' in cfg.MODEL.METRIC_LOSS_TYPE:
+        print('Train with center loss')
+        optimizer_center = torch.optim.SGD(center_criterion.parameters(), lr=cfg.SOLVER.CENTER_LR)
+    else:
+        optimizer_center = None
 
     scheduler = create_scheduler(cfg, optimizer)
 
