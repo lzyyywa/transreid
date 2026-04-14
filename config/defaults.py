@@ -32,8 +32,9 @@ _C.MODEL.PRETRAIN_CHOICE = 'imagenet'
 
 # If train with BNNeck, options: 'bnneck' or 'no'
 _C.MODEL.NECK = 'bnneck'
-# If train loss include center loss, options: 'yes' or 'no'. Loss with center loss has different optimizer configuration
-_C.MODEL.IF_WITH_CENTER = 'no'
+# If train loss include center loss, options: 'yes' or 'no'. 
+# 修改建议：若要激活质心损失，YAML中需设为 'yes'
+_C.MODEL.IF_WITH_CENTER = 'no' 
 
 _C.MODEL.ID_LOSS_TYPE = 'softmax'
 _C.MODEL.ID_LOSS_WEIGHT = 1.0
@@ -87,6 +88,9 @@ _C.INPUT.PIXEL_STD = [0.229, 0.224, 0.225]
 # Value of padding size
 _C.INPUT.PADDING = 10
 
+# 阶段 1: 物理运动模糊触发概率 (建议从 0.5 降至 0.25 以稳固初期特征学习)
+_C.INPUT.MOTION_BLUR_PROB = 0.25
+
 # -----------------------------------------------------------------------------
 # Dataset
 # -----------------------------------------------------------------------------
@@ -95,6 +99,9 @@ _C.DATASETS = CN()
 _C.DATASETS.NAMES = ('market1501')
 # Root directory where datasets should be used (and downloaded if not found)
 _C.DATASETS.ROOT_DIR = ('../data')
+
+# 阶段 2: 批次内行人遮挡增强开关 (处理拥挤场景的关键)
+_C.DATASETS.BIPO = True 
 
 
 # -----------------------------------------------------------------------------
@@ -130,7 +137,7 @@ _C.SOLVER.MOMENTUM = 0.9
 _C.SOLVER.MARGIN = 0.3
 # Learning rate of SGD to learn the centers of center loss
 _C.SOLVER.CENTER_LR = 0.5
-# Balanced weight of center loss
+# Balanced weight of center loss (阶段 3: 质心损失的权重)
 _C.SOLVER.CENTER_LOSS_WEIGHT = 0.0005
 
 # Settings of weight decay
@@ -158,8 +165,6 @@ _C.SOLVER.LOG_PERIOD = 100
 # epoch number of validation
 _C.SOLVER.EVAL_PERIOD = 10
 # Number of images per batch
-# This is global, so if we have 8 GPUs and IMS_PER_BATCH = 128, each GPU will
-# contain 16 images per batch
 _C.SOLVER.IMS_PER_BATCH = 64
 
 # ---------------------------------------------------------------------------- #
@@ -169,8 +174,15 @@ _C.SOLVER.IMS_PER_BATCH = 64
 _C.TEST = CN()
 # Number of images per batch during test
 _C.TEST.IMS_PER_BATCH = 128
-# If test with re-ranking, options: 'True','False'
+# If test with re-ranking, options: 'True','False' (旧版开关，建议保持 False)
 _C.TEST.RE_RANKING = False
+
+# 阶段 4: 重排序类型配置 (满足 <30ms 延迟红线的核心)
+# 可选: 'no', 'yes' (k-reciprocal), 'cheb_gr'
+_C.TEST.RE_RANKING_TYPE = 'cheb_gr' 
+# 切比雪夫不等式系数 (控制噪声过滤强度，建议 2.0)
+_C.TEST.KAPPA = 2.0
+
 # Path to trained model
 _C.TEST.WEIGHT = ""
 # Which feature of BNNeck to be used for test, before or after BNNneck, options: 'before' or 'after'
