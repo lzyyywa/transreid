@@ -59,7 +59,7 @@ TEST:
   IMS_PER_BATCH: 256
   # 阶段 4：配置超低延迟重排序
   RE_RANKING: False # 禁用旧版 k-reciprocal
-  RE_RANKING_TYPE: 'cheb_gr' # 开启 Cheb-GR
+  RE_RANKING_TYPE: 'no' # 开启 Cheb-GR
   KAPPA: 2.0 # 切比雪夫过滤强度
   WEIGHT: '/root/TransReID-master/logs/BallShow_vit_transreid_stride/transformer_120.pth'
   NECK_FEAT: 'before'
