@@ -163,41 +163,6 @@ class Attention(nn.Module):
         x = self.proj_drop(x)
         return x
 
-class LocalAttention(nn.Module):
-    """即插即用的局部注意力模块，捕捉球衣以外的微小特征（护膝、球鞋） [cite: 53, 54]"""
-    def __init__(self, dim, num_heads=8, window_size=14, qkv_bias=False):
-        super().__init__()
-        self.num_heads = num_heads
-        self.window_size = window_size
-        head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
-
-    def forward(self, x):
-        # 严格防错逻辑：消除 NoneType 崩溃隐患
-        if x is None:
-            return None
-            
-        B, N, C = x.shape
-        # 为防止序列长度无法整除窗口导致的截断报错，这里采用简化的残差旁路提取 [cite: 54]
-        # 如果长度不足或计算异常，直接返回全 0 张量（等效于该层局部注意力未激活），绝对不会返回 None
-        try:
-            qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-            q, k, v = qkv[0], qkv[1], qkv[2]
-            
-            # 引入对角线掩码模拟局部感受野 [cite: 56]
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            # 限制注意力只在相邻的 patch 之间发生 [cite: 54, 56]
-            mask = torch.eye(N, device=x.device).bool()
-            attn = attn.masked_fill(~mask, float('-inf'))
-            attn = attn.softmax(dim=-1)
-            
-            x_out = (attn @ v).transpose(1, 2).reshape(B, N, C)
-            x_out = self.proj(x_out)
-            return x_out
-        except Exception:
-            return torch.zeros_like(x)
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
@@ -207,25 +172,14 @@ class Block(nn.Module):
         self.attn = Attention(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
         
-        # 注入局部注意力旁路 [cite: 53]
-        self.local_attn = LocalAttention(dim=dim, num_heads=num_heads, qkv_bias=qkv_bias)
-        
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x):
-        # 全局与局部特征的双流融合 [cite: 56]
-        attn_out = self.attn(self.norm1(x))
-        
-        # 防护逻辑：确保 local_out 即使异常也不会污染计算图
-        if hasattr(self, 'local_attn'):
-            local_out = self.local_attn(self.norm1(x))
-            if local_out is not None:
-                attn_out = attn_out + 0.1 * local_out # 以 0.1 的残差权重融合局部细节 [cite: 56]
-
-        x = x + self.drop_path(attn_out)
+        # ✅ 干净利落的残差连接，绝不拖泥带水，把局部特征任务全权交给强大的 JPM 模块！
+        x = x + self.drop_path(self.attn(self.norm1(x)))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
