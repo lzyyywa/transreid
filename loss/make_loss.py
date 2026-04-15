@@ -1,12 +1,11 @@
 # encoding: utf-8
 import torch.nn.functional as F
-from .softmax_loss import CrossEntropyLabelSmooth, LabelSmoothingCrossEntropy
+from .softmax_loss import CrossEntropyLabelSmooth
 from .triplet_loss import TripletLoss
 from .center_loss import CenterLoss
 
 def make_loss(cfg, num_classes):    
     sampler = cfg.DATALOADER.SAMPLER
-    # 修复：ViT-Base 的输出维度是 768，不是 2048
     feat_dim = 768 
     center_criterion = CenterLoss(num_classes=num_classes, feat_dim=feat_dim, use_gpu=True)
     
@@ -45,16 +44,14 @@ def make_loss(cfg, num_classes):
             else:
                 TRI_LOSS = triplet(feat, target)[0]
 
-            # 核心修复：将 CenterLoss 真正加入计算图
             if cfg.MODEL.IF_WITH_CENTER == 'yes' or cfg.MODEL.IF_WITH_CENTER == 'on':
+                # 🚀 致命修复：绝对不能把局部特征（手臂、腿）强行和全局特征（全身）往同一个质心聚类！
+                # 必须只针对全局特征 feat[0] 计算 CenterLoss！
                 if isinstance(feat, list):
-                    CENTER_LOSS = [center_criterion(feats, target) for feats in feat[1:]]
-                    CENTER_LOSS = sum(CENTER_LOSS) / len(CENTER_LOSS)
-                    CENTER_LOSS = 0.5 * CENTER_LOSS + 0.5 * center_criterion(feat[0], target)
+                    CENTER_LOSS = center_criterion(feat[0], target)
                 else:
                     CENTER_LOSS = center_criterion(feat, target)
                 
-                # 返回三种 Loss 的加权总和
                 return cfg.MODEL.ID_LOSS_WEIGHT * ID_LOSS + \
                        cfg.MODEL.TRIPLET_LOSS_WEIGHT * TRI_LOSS + \
                        cfg.SOLVER.CENTER_LOSS_WEIGHT * CENTER_LOSS
