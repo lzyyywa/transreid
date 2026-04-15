@@ -42,7 +42,6 @@ def do_train(cfg,
 
     scaler = amp.GradScaler()
 
-    # 开始训练循环
     for epoch in range(1, epochs + 1):
         start_time = time.time()
         loss_meter.reset()
@@ -52,44 +51,44 @@ def do_train(cfg,
         
         for n_iter, (img, vid, target_cam, target_view) in enumerate(train_loader):
             optimizer.zero_grad()
-            optimizer_center.zero_grad()
+            if optimizer_center is not None:
+                optimizer_center.zero_grad()
             
             img = img.to(device)
             target = vid.to(device)
             target_cam = target_cam.to(device)
             target_view = target_view.to(device)
 
-            # --- 阶段 2: 引入 BIPO (批次内行人遮挡增强) ---
-            # 适当降低概率至 0.2，确保模型能够收敛
+            # --- 阶段 2: 向量化 BIPO (不拖慢 GPU 速度的安全实现) ---
             if cfg.DATASETS.BIPO and random.random() < 0.2:
-                batch_size = img.size(0)
-                indices = torch.randperm(batch_size)
-                for i in range(batch_size):
-                    src_idx = indices[i]
-                    # 确保不是同一个 ID 的球员，模拟真实的拥挤遮挡
-                    if vid[i] != vid[src_idx]:
-                        # 随机截取 40x40 的局部 patch
+                with torch.no_grad():
+                    shifted_img = torch.roll(img, shifts=1, dims=0)
+                    shifted_vid = torch.roll(vid, shifts=1, dims=0)
+                    diff_mask = (vid != shifted_vid)
+                    if diff_mask.any():
                         h_start = random.randint(0, img.size(2) - 40)
                         w_start = random.randint(0, img.size(3) - 40)
-                        patch = img[src_idx, :, h_start:h_start+40, w_start:w_start+40]
-                        img[i, :, h_start:h_start+40, w_start:w_start+40] = patch
+                        patch = shifted_img[:, :, h_start:h_start+40, w_start:w_start+40]
+                        img[diff_mask, :, h_start:h_start+40, w_start:w_start+40] = patch[diff_mask]
 
             with amp.autocast(enabled=True):
                 score, feat = model(img, target, cam_label=target_cam, view_label=target_view )
                 loss = loss_fn(score, feat, target, target_cam)
 
+            # --- 致命 Bug 2 修复区：AMP 正确的更新逻辑 ---
             scaler.scale(loss).backward()
             scaler.step(optimizer)
-            scaler.update()
 
-            # 核心修正：判断质心损失是否开启并执行优化
             if cfg.MODEL.IF_WITH_CENTER == 'yes' or 'center' in cfg.MODEL.METRIC_LOSS_TYPE:
-                for param in center_criterion.parameters():
-                    param.grad.data *= (1. / cfg.SOLVER.CENTER_LOSS_WEIGHT)
-                scaler.step(optimizer_center)
-                scaler.update()
+                if optimizer_center is not None:
+                    for param in center_criterion.parameters():
+                        param.grad.data *= (1. / cfg.SOLVER.CENTER_LOSS_WEIGHT)
+                    scaler.step(optimizer_center)
 
-            # 计算准确率
+            # 绝对不能写两次！只能在这里执行唯一的一次 update
+            scaler.update()
+            # ----------------------------------------------------
+
             if isinstance(score, list):
                 acc = (score[0].max(1)[1] == target).float().mean()
             else:
@@ -110,7 +109,6 @@ def do_train(cfg,
             logger.info("Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]"
                     .format(epoch, time_per_batch, train_loader.batch_size / time_per_batch))
 
-        # 保存权重
         if epoch % checkpoint_period == 0:
             save_path = os.path.join(cfg.OUTPUT_DIR, cfg.MODEL.NAME + '_{}.pth'.format(epoch))
             if cfg.MODEL.DIST_TRAIN:
@@ -119,7 +117,6 @@ def do_train(cfg,
             else:
                 torch.save(model.state_dict(), save_path)
 
-        # --- 验证环节：调用 do_inference 以激活 Cheb-GR ---
         if epoch % eval_period == 0:
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
@@ -129,10 +126,7 @@ def do_train(cfg,
             torch.cuda.empty_cache()
 
 
-def do_inference(cfg,
-                 model,
-                 val_loader,
-                 num_query):
+def do_inference(cfg, model, val_loader, num_query):
     device = "cuda"
     logger = logging.getLogger("transreid.test")
     logger.info("Enter inferencing")
@@ -158,16 +152,18 @@ def do_inference(cfg,
             evaluator.update((feat, pid, camid))
             img_path_list.extend(imgpath)
 
-    # --- 阶段 4: 集成超低延迟重排序 (Cheb-GR) ---
     if cfg.TEST.RE_RANKING_TYPE in ['cheb_gr', 'yes']:
-        # 提取特征
         feats = torch.cat(evaluator.feats, dim=0)
         
-        # 分离 Query 和 Gallery
+        # --- 致命 Bug 1 修复区：强制执行 L2 归一化！ ---
+        if cfg.TEST.FEAT_NORM == 'yes':
+            logger.info("Applying L2 Normalization before re-ranking...")
+            feats = torch.nn.functional.normalize(feats, dim=1, p=2)
+        # ---------------------------------------------
+        
         qf = feats[:num_query]
         gf = feats[num_query:]
         
-        # 计算欧氏距离矩阵
         m, n = qf.shape[0], gf.shape[0]
         distmat = torch.pow(qf, 2).sum(dim=1, keepdim=True).expand(m, n) + \
                   torch.pow(gf, 2).sum(dim=1, keepdim=True).expand(n, m).t()
@@ -175,18 +171,14 @@ def do_inference(cfg,
         distmat = distmat.cpu().numpy()
 
         if cfg.TEST.RE_RANKING_TYPE == 'cheb_gr':
-            # Cheb-GR: 线性复杂度重排序
             logger.info("Applying Cheb-GR re-ranking...")
             distmat = cheb_gr_reranking(distmat, kappa=cfg.TEST.KAPPA)
         else:
-            # 兼容旧版 k-reciprocal
             logger.info("Applying k-reciprocal re-ranking...")
             distmat = re_ranking(qf, gf, k1=20, k2=6, lambda_value=0.3)
         
-        # 使用重排序矩阵计算最终指标
         cmc, mAP, _, _, _, _, _ = evaluator.compute(distmat=distmat)
     else:
-        # 无重排序模式
         cmc, mAP, _, _, _, _, _ = evaluator.compute()
 
     logger.info("Validation Results ")
